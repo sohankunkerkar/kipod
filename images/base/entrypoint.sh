@@ -31,6 +31,17 @@ chmod 755 /var/run/crio
 chmod 755 /var/lib/crio
 chmod 755 /var/lib/kubelet
 
+# Copy user-provided CRI-O config if mounted
+if [ -f /tmp/crio-user-config.conf ]; then
+    echo "Applying user-provided CRI-O configuration..."
+    cp /tmp/crio-user-config.conf /etc/crio/crio.conf.d/99-user.conf
+fi
+
+# Configure cgroup manager based on environment
+if [ -f /usr/local/bin/configure-cgroup-manager.sh ]; then
+    /usr/local/bin/configure-cgroup-manager.sh
+fi
+
 echo "Kipod node initialized, starting systemd..."
 
 # Execute the CMD (systemd)

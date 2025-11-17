@@ -1,0 +1,27 @@
+# Version Override Configuration
+# Specify custom versions for testing or compatibility
+apiVersion: v1alpha1
+kind: ClusterConfig
+
+name: k8s-133-cluster
+
+# Specify component versions
+versions:
+  kubernetes: "1.33.0"  # Use Kubernetes 1.33
+  crio: "1.33"          # CRI-O must be compatible (n-2 policy)
+  crun: "1.24"          # Optional: specify crun version
+  runc: "1.3.2"         # Optional: specify runc version
+
+# Multi-node cluster
+nodes:
+  controlPlanes: 1
+  workers: 2
+
+# Custom networking (optional)
+networking:
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "10.96.0.0/12"
+  dnsDomain: "cluster.local"
+
+# Cgroup manager (cgroupfs or systemd)
+cgroupManager: cgroupfs

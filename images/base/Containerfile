@@ -2,7 +2,40 @@
 # This builds a container image suitable for running Kubernetes with CRI-O in rootless Podman
 # Based on Fedora minimal for faster builds
 
-FROM registry.fedoraproject.org/fedora-minimal:39
+# Stage 1: Build patched CRI-O
+FROM registry.fedoraproject.org/fedora:43 AS crio-builder
+
+# Install build dependencies
+RUN dnf install -y \
+  git \
+  golang \
+  make \
+  gcc \
+  patch \
+  glib2-devel \
+  glibc-devel \
+  glibc-static \
+  libseccomp-devel \
+  systemd-devel \
+  gpgme-devel \
+  device-mapper-devel \
+  && dnf clean all
+
+# Clone CRI-O source
+# Clone CRI-O source
+# Note: Using release branch to match version
+RUN git clone --depth 1 --branch release-${CRIO_VERSION} https://github.com/cri-o/cri-o.git /cri-o
+
+# Modify CRI-O to support CRIO_FORCE_SYSTEM_BUS environment variable
+# This allows forcing system bus usage even in user namespaces
+COPY patch_dbusmgr.py /tmp/
+RUN python3 /tmp/patch_dbusmgr.py /cri-o/internal/dbusmgr/dbusmgr.go
+
+# Build CRI-O
+RUN cd /cri-o && make
+
+# Stage 2: Main node image
+FROM registry.fedoraproject.org/fedora-minimal:43
 
 # Metadata
 LABEL maintainer="kipod"
@@ -10,47 +43,74 @@ LABEL description="Kubernetes node image with CRI-O for rootless Podman"
 
 # Environment variables
 ENV container=podman \
-    CRIO_VERSION=1.28 \
-    K8S_VERSION=1.28
+  CRIO_VERSION=${CRIO_VERSION} \
+  K8S_VERSION=${K8S_VERSION}
 
 # Install systemd and basic tools (using microdnf for minimal image)
 RUN microdnf install -y \
-    systemd \
-    iproute \
-    iptables \
-    procps-ng \
-    && microdnf clean all
+  systemd \
+  iproute \
+  iptables \
+  procps-ng \
+  && microdnf clean all
 
 # Install additional required packages
 RUN microdnf install -y \
-    conntrack-tools \
-    socat \
-    ethtool \
-    ebtables \
-    ipset \
-    curl \
-    && microdnf clean all
+  conntrack-tools \
+  socat \
+  ethtool \
+  ebtables \
+  ipset \
+  curl \
+  && microdnf clean all
 
 # Configure systemd for running in a container
 RUN (cd /lib/systemd/system/sysinit.target.wants/; for i in *; do [ $i == systemd-tmpfiles-setup.service ] || rm -f $i; done); \
-    rm -f /lib/systemd/system/multi-user.target.wants/*; \
-    rm -f /etc/systemd/system/*.wants/*; \
-    rm -f /lib/systemd/system/local-fs.target.wants/*; \
-    rm -f /lib/systemd/system/sockets.target.wants/*udev*; \
-    rm -f /lib/systemd/system/sockets.target.wants/*initctl*; \
-    rm -f /lib/systemd/system/basic.target.wants/*; \
-    rm -f /lib/systemd/system/anaconda.target.wants/*;
+  rm -f /lib/systemd/system/multi-user.target.wants/*; \
+  rm -f /etc/systemd/system/*.wants/*; \
+  rm -f /lib/systemd/system/local-fs.target.wants/*; \
+  rm -f /lib/systemd/system/sockets.target.wants/*udev*; \
+  rm -f /lib/systemd/system/sockets.target.wants/*initctl*; \
+  rm -f /lib/systemd/system/basic.target.wants/*; \
+  rm -f /lib/systemd/system/anaconda.target.wants/*;
 
-# Install CRI-O and dependencies
+# Install CRI-O from official packaging repos
+# See: https://github.com/cri-o/packaging
+RUN cat > /etc/yum.repos.d/cri-o.repo <<EOF
+[cri-o]
+name=CRI-O
+baseurl=https://download.opensuse.org/repositories/isv:/cri-o:/stable:/v${CRIO_VERSION}/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://download.opensuse.org/repositories/isv:/cri-o:/stable:/v${CRIO_VERSION}/rpm/repodata/repomd.xml.key
+EOF
+
+# Install CRI-O dependencies (but not crio binary itself, we'll use our patched version)
 RUN microdnf install -y \
-    cri-o \
-    cri-tools \
-    containernetworking-plugins \
-    fuse-overlayfs \
-    slirp4netns \
-    crun \
-    jq \
-    && microdnf clean all
+  cri-tools \
+  containernetworking-plugins \
+  fuse-overlayfs \
+  conmon \
+  containers-common \
+  crun \
+  slirp4netns \
+  jq \
+  dbus \
+  && microdnf clean all
+
+# Copy patched CRI-O binaries from builder stage
+COPY --from=crio-builder /cri-o/bin/crio /usr/local/bin/crio
+COPY --from=crio-builder /cri-o/bin/pinns /usr/local/bin/pinns
+
+# Copy CRI-O systemd service files
+COPY --from=crio-builder /cri-o/contrib/systemd/crio.service /usr/lib/systemd/system/crio.service
+
+# Install crun and runc from GitHub releases for exact versions
+RUN curl -L https://github.com/containers/crun/releases/download/1.25/crun-1.25-linux-amd64 -o /usr/bin/crun && \
+  chmod +x /usr/bin/crun
+
+RUN curl -L https://github.com/opencontainers/runc/releases/download/v1.3.3/runc.amd64 -o /usr/bin/runc && \
+  chmod +x /usr/bin/runc
 
 # Install Kubernetes components
 RUN cat <<EOF | tee /etc/yum.repos.d/kubernetes.repo
@@ -63,152 +123,83 @@ gpgkey=https://pkgs.k8s.io/core:/stable:/v${K8S_VERSION}/rpm/repodata/repomd.xml
 EOF
 
 RUN microdnf install -y \
-    kubelet-${K8S_VERSION}* \
-    kubeadm-${K8S_VERSION}* \
-    kubectl-${K8S_VERSION}* \
-    && microdnf clean all
+  kubelet-${K8S_VERSION}* \
+  kubeadm-${K8S_VERSION}* \
+  kubectl-${K8S_VERSION}* \
+  && microdnf clean all
 
 # Configure CRI-O for rootless/nested containers
 RUN mkdir -p /etc/crio/crio.conf.d
 
 # Install crun wrapper to handle oomScoreAdj in rootless mode
+# Move the downloaded crun binary to crun.real so the wrapper can use it
 COPY crun-wrapper.sh /usr/local/bin/crun-wrapper.sh
 RUN chmod +x /usr/local/bin/crun-wrapper.sh && \
-    mv /usr/bin/crun /usr/bin/crun.real && \
-    ln -s /usr/local/bin/crun-wrapper.sh /usr/bin/crun
+  mv /usr/bin/crun /usr/bin/crun.real && \
+  ln -s /usr/local/bin/crun-wrapper.sh /usr/bin/crun
+
+# Install cgroup manager configuration script
+COPY configure-cgroup-manager.sh /usr/local/bin/configure-cgroup-manager.sh
+RUN chmod +x /usr/local/bin/configure-cgroup-manager.sh
+
+
 
 # CRI-O configuration for nested containers with VFS
-RUN cat > /etc/crio/crio.conf.d/00-kipod.conf <<EOF
-[crio]
-  storage_driver = "vfs"
+# Note: cgroup_manager and conmon_cgroup are configured at runtime by configure-cgroup-manager.sh
+COPY files/crio/00-kipod.conf /etc/crio/crio.conf.d/00-kipod.conf
 
-[crio.api]
-  listen = "/var/run/crio/crio.sock"
+# Configure CRI-O to use the wrapper for crun
+COPY files/crio/99-kipod-wrapper.conf /etc/crio/crio.conf.d/99-kipod-wrapper.conf
 
-[crio.runtime]
-  cgroup_manager = "cgroupfs"
-  conmon_cgroup = "pod"
-  default_runtime = "crun"
+# Configure containers/storage to use VFS
+COPY files/storage/storage.conf /etc/containers/storage.conf
 
-  # Allow running without cgroupfs root access
-  manage_ns_lifecycle = true
-
-[crio.runtime.runtimes.crun]
-  runtime_path = "/usr/bin/crun"
-  runtime_type = "oci"
-
-[crio.image]
-  pause_image = "registry.k8s.io/pause:3.9"
-  pause_command = "/pause"
-
-[crio.network]
-  network_dir = "/etc/cni/net.d/"
-  plugin_dirs = ["/usr/libexec/cni/", "/opt/cni/bin/"]
-EOF
-
-# Configure storage.conf for VFS in nested containers
-# VFS is slower but avoids overlay whiteout file issues in nested containers
-RUN mkdir -p /etc/containers && cat > /etc/containers/storage.conf <<EOF
-[storage]
-  driver = "vfs"
-  runroot = "/run/containers/storage"
-  graphroot = "/var/lib/containers/storage"
-
-[storage.options.vfs]
-  # VFS driver doesn't use overlays, so no whiteout file issues
-  # Critical for rootless mode - ignore chown errors
-  ignore_chown_errors = "true"
-EOF
-
-# Configure crictl to use CRI-O
-RUN cat > /etc/crictl.yaml <<EOF
-runtime-endpoint: unix:///var/run/crio/crio.sock
-image-endpoint: unix:///var/run/crio/crio.sock
-timeout: 10
-debug: false
-EOF
+# Configure crictl
+COPY files/crictl.yaml /etc/crictl.yaml
 
 # Configure CNI
 RUN mkdir -p /etc/cni/net.d /opt/cni/bin
 
-# Basic bridge CNI configuration
-RUN cat > /etc/cni/net.d/10-kipod-bridge.conflist <<EOF
-{
-  "cniVersion": "1.0.0",
-  "name": "kipod-bridge",
-  "plugins": [
-    {
-      "type": "bridge",
-      "bridge": "cni0",
-      "isGateway": true,
-      "ipMasq": true,
-      "hairpinMode": true,
-      "ipam": {
-        "type": "host-local",
-        "routes": [
-          { "dst": "0.0.0.0/0" }
-        ],
-        "ranges": [
-          [{ "subnet": "10.244.0.0/16" }]
-        ]
-      }
-    },
-    {
-      "type": "portmap",
-      "capabilities": {
-        "portMappings": true
-      }
-    },
-    {
-      "type": "firewall"
-    },
-    {
-      "type": "tuning"
-    }
-  ]
-}
-EOF
+# Install CNI plugins and configuration
+RUN mkdir -p /etc/cni/net.d
+COPY files/cni/10-kipod-bridge.conflist /etc/cni/net.d/10-kipod-bridge.conflist
 
 # Kernel modules configuration
-RUN mkdir -p /etc/modules-load.d && cat > /etc/modules-load.d/kipod.conf <<EOF
-overlay
-br_netfilter
-EOF
+RUN mkdir -p /etc/modules-load.d
+# Load necessary kernel modules
+COPY files/modules/kipod.conf /etc/modules-load.d/kipod.conf
 
-# Sysctl configuration for Kubernetes
-RUN mkdir -p /etc/sysctl.d && cat > /etc/sysctl.d/99-kubernetes-cri.conf <<EOF
-net.bridge.bridge-nf-call-iptables  = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-net.ipv4.ip_forward                 = 1
-EOF
+# Apply sysctl settings
+RUN mkdir -p /etc/sysctl.d
+COPY files/sysctl/99-kubernetes-cri.conf /etc/sysctl.d/99-kubernetes-cri.conf
 
 # Disable swap (Kubernetes requirement)
 RUN systemctl mask swap.target
 
-# Configure kubelet to use CRI-O and allow swap
-# Note: kubeadm expects KUBELET_EXTRA_ARGS in /etc/sysconfig/kubelet
-# KubeletInUserNamespace: allows kubelet to run in user namespace (rootless mode)
+# Install Kubelet configuration
+# Note: We use cgroupfs driver by default as it's more stable for rootless
 RUN mkdir -p /etc/sysconfig
-RUN cat > /etc/sysconfig/kubelet <<EOF
-KUBELET_EXTRA_ARGS=--container-runtime-endpoint=unix:///var/run/crio/crio.sock --cgroup-driver=cgroupfs --fail-swap-on=false --feature-gates=KubeletInUserNamespace=true
-EOF
+COPY files/kubelet/kubelet /etc/sysconfig/kubelet
 
-# Configure systemd service limits for CRI-O
-RUN mkdir -p /etc/systemd/system/crio.service.d && cat > /etc/systemd/system/crio.service.d/10-file-limit.conf <<EOF
-[Service]
-LimitNOFILE=1048576
-EOF
+# Increase open file limit for CRI-O
+RUN mkdir -p /etc/systemd/system/crio.service.d
+COPY files/systemd/crio/10-file-limit.conf /etc/systemd/system/crio.service.d/10-file-limit.conf
+
+# Add D-Bus dependency to CRI-O service
+COPY files/systemd/crio/20-dbus-dependency.conf /etc/systemd/system/crio.service.d/20-dbus-dependency.conf
 
 # Enable services
 RUN systemctl enable crio
 RUN systemctl enable kubelet
 
+# Enable the D-Bus session service directly (not just socket-activated)
+RUN systemctl enable dbus-broker.service
 # Create necessary directories
 RUN mkdir -p /var/lib/kubelet \
-    /var/lib/crio \
-    /var/run/crio \
-    /etc/kubernetes/manifests \
-    /etc/kubernetes/pki
+  /var/lib/crio \
+  /var/run/crio \
+  /etc/kubernetes/manifests \
+  /etc/kubernetes/pki
 
 # Install skopeo and crane for image pre-loading
 RUN microdnf install -y skopeo && microdnf clean all
@@ -216,19 +207,19 @@ RUN microdnf install -y skopeo && microdnf clean all
 # Download Kubernetes images as tarballs to avoid nested fuse-overlayfs issues
 # These will be loaded into CRI-O at container startup
 RUN mkdir -p /kind/images && \
-    K8S_VERSION=1.28.15 && \
-    for image in \
-        "registry.k8s.io/kube-apiserver:v${K8S_VERSION}" \
-        "registry.k8s.io/kube-controller-manager:v${K8S_VERSION}" \
-        "registry.k8s.io/kube-scheduler:v${K8S_VERSION}" \
-        "registry.k8s.io/kube-proxy:v${K8S_VERSION}" \
-        "registry.k8s.io/pause:3.9" \
-        "registry.k8s.io/etcd:3.5.15-0" \
-        "registry.k8s.io/coredns/coredns:v1.10.1"; do \
-            echo "Downloading image tarball: $image"; \
-            filename=$(echo $image | tr '/:' '_'); \
-            skopeo copy docker://$image docker-archive:/kind/images/${filename}.tar:$image; \
-    done
+  K8S_VERSION=${K8S_FULL_VERSION} && \
+  for image in \
+  "registry.k8s.io/kube-apiserver:v${K8S_VERSION}" \
+  "registry.k8s.io/kube-controller-manager:v${K8S_VERSION}" \
+  "registry.k8s.io/kube-scheduler:v${K8S_VERSION}" \
+  "registry.k8s.io/kube-proxy:v${K8S_VERSION}" \
+  "registry.k8s.io/pause:3.9" \
+  "registry.k8s.io/etcd:3.5.15-0" \
+  "registry.k8s.io/coredns/coredns:v1.10.1"; do \
+  echo "Downloading image tarball: $image"; \
+  filename=$(echo $image | tr '/:' '_'); \
+  skopeo copy docker://$image docker-archive:/kind/images/${filename}.tar:$image; \
+  done
 
 # Set up entrypoint
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

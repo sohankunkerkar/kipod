@@ -31,16 +31,19 @@ type ImageBuildOptions struct {
 
 	// CRIOVersion is the CRI-O version to install
 	CRIOVersion string
+
+	// Rebuild forces a rebuild even if the image already exists
+	Rebuild bool
 }
 
-// DefaultImageBuildOptions returns default build options
+// DefaultImageBuildOptions returns default build options with latest versions
 func DefaultImageBuildOptions() *ImageBuildOptions {
 	return &ImageBuildOptions{
 		ImageName:         DefaultImageName,
 		ImageTag:          DefaultImageTag,
 		BaseDir:           "",
-		KubernetesVersion: "1.28",
-		CRIOVersion:       "1.28",
+		KubernetesVersion: "1.34", // Latest K8s (Nov 2025)
+		CRIOVersion:       "1.34", // Latest CRI-O (Nov 2025)
 	}
 }
 
@@ -87,18 +90,75 @@ func BuildImage(opts *ImageBuildOptions) error {
 
 	imageTag := fmt.Sprintf("%s:%s", opts.ImageName, opts.ImageTag)
 
+	// Check if image already exists and skip if not rebuilding
+	if !opts.Rebuild {
+		exists, err := ImageExists(imageTag)
+		if err != nil {
+			return fmt.Errorf("failed to check if image exists: %w", err)
+		}
+		if exists {
+			fmt.Printf("✓ Image already exists: %s\n", imageTag)
+			fmt.Printf("  Skipping build (use --rebuild to force rebuild)\n")
+			fmt.Printf("  Kubernetes version: %s\n", opts.KubernetesVersion)
+			fmt.Printf("  CRI-O version: %s\n", opts.CRIOVersion)
+			return nil
+		}
+	}
+
 	fmt.Printf("Building kipod node image: %s\n", imageTag)
 	fmt.Printf("Using Containerfile from: %s\n", baseDir)
 	fmt.Printf("Kubernetes version: %s\n", opts.KubernetesVersion)
 	fmt.Printf("CRI-O version: %s\n", opts.CRIOVersion)
 	fmt.Println()
 
+	// Parse versions to get major.minor and full version
+	k8sMajorMinor := opts.KubernetesVersion
+	k8sFull := opts.KubernetesVersion
+	if len(k8sFull) > 0 && k8sFull[0] == 'v' {
+		k8sFull = k8sFull[1:]
+	}
+	// If version is just x.y, append .0 for full version
+	// If version is x.y.z, extract x.y for major.minor
+	// Simple heuristic: count dots
+	dots := 0
+	for _, c := range k8sFull {
+		if c == '.' {
+			dots++
+		}
+	}
+	if dots == 1 {
+		k8sMajorMinor = k8sFull
+		k8sFull = k8sFull + ".0"
+	} else if dots >= 2 {
+		// Extract x.y
+		// Find second dot
+		firstDot := -1
+		secondDot := -1
+		for i, c := range k8sFull {
+			if c == '.' {
+				if firstDot == -1 {
+					firstDot = i
+				} else {
+					secondDot = i
+					break
+				}
+			}
+		}
+		if secondDot != -1 {
+			k8sMajorMinor = k8sFull[:secondDot]
+		}
+	}
+
+	crioMajorMinor := opts.CRIOVersion
+	// crioFull := opts.CRIOVersion // Unused for now as we use release branch
+
 	// Build the image using podman build
 	args := []string{
 		"build",
 		"--tag", imageTag,
-		"--build-arg", fmt.Sprintf("K8S_VERSION=%s", opts.KubernetesVersion),
-		"--build-arg", fmt.Sprintf("CRIO_VERSION=%s", opts.CRIOVersion),
+		"--build-arg", fmt.Sprintf("K8S_VERSION=%s", k8sMajorMinor),
+		"--build-arg", fmt.Sprintf("K8S_FULL_VERSION=%s", k8sFull),
+		"--build-arg", fmt.Sprintf("CRIO_VERSION=%s", crioMajorMinor),
 		"--file", containerfilePath,
 		baseDir,
 	}

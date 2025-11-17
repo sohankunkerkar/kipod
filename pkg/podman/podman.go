@@ -2,6 +2,7 @@ package podman
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -36,6 +37,8 @@ type CreateContainerOptions struct {
 	Devices      []string
 	Sysctls      map[string]string
 	Env          []string
+	Ports        []string // Port mappings in format "hostPort:containerPort"
+	Network      string
 }
 
 // CreateContainer creates a new podman container
@@ -105,6 +108,16 @@ func CreateContainer(opts CreateContainerOptions) (string, error) {
 		args = append(args, "-e", env)
 	}
 
+	// Port mappings
+	for _, port := range opts.Ports {
+		args = append(args, "-p", port)
+	}
+
+	// Network
+	if opts.Network != "" {
+		args = append(args, "--network", opts.Network)
+	}
+
 	// Image and command
 	args = append(args, opts.Image)
 
@@ -129,7 +142,7 @@ func DeleteContainer(nameOrID string) error {
 
 // ListContainers lists containers with specific labels
 func ListContainers(labels map[string]string) ([]Container, error) {
-	args := []string{"ps", "-a", "--format", "{{.ID}}\t{{.Names}}"}
+	args := []string{"ps", "-a", "--format", "{{.ID}}\t{{.Names}}\t{{json .Labels}}"}
 
 	for k, v := range labels {
 		args = append(args, "--filter", fmt.Sprintf("label=%s=%s", k, v))
@@ -149,10 +162,22 @@ func ListContainers(labels map[string]string) ([]Container, error) {
 		}
 		parts := strings.Split(line, "\t")
 		if len(parts) >= 2 {
-			containers = append(containers, Container{
-				ID:   parts[0],
-				Name: parts[1],
-			})
+			container := Container{
+				ID:     parts[0],
+				Name:   parts[1],
+				Labels: make(map[string]string),
+			}
+
+			if len(parts) >= 3 {
+				labelStr := parts[2]
+				if labelStr != "" {
+					if err := json.Unmarshal([]byte(labelStr), &container.Labels); err != nil {
+						// Ignore parsing errors, just log or skip
+						// fmt.Printf("Warning: failed to parse labels for container %s: %v\n", container.ID, err)
+					}
+				}
+			}
+			containers = append(containers, container)
 		}
 	}
 
@@ -195,4 +220,25 @@ func GetContainerIP(containerID string) (string, error) {
 	}
 
 	return strings.TrimSpace(string(output)), nil
+}
+
+// NetworkExists checks if a network exists
+func NetworkExists(name string) (bool, error) {
+	cmd := exec.Command("podman", "network", "exists", name)
+	if err := cmd.Run(); err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok && exitError.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("failed to check network existence: %w", err)
+	}
+	return true, nil
+}
+
+// CreateNetwork creates a new podman network
+func CreateNetwork(name string) error {
+	cmd := exec.Command("podman", "network", "create", name)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to create network: %w\nOutput: %s", err, output)
+	}
+	return nil
 }

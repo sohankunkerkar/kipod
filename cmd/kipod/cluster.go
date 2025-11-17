@@ -2,14 +2,89 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"regexp"
+
+	"time"
 
 	"github.com/skunkerk/kipod/pkg/cluster"
+	"github.com/skunkerk/kipod/pkg/config"
+	"github.com/skunkerk/kipod/pkg/style"
 )
 
-func createCluster(name, configFile string) error {
+func createCluster(name, configFile, nodeImage, kubeconfigPath string, retain bool, waitDuration string) error {
+	// TODO: Implement nodeImage, kubeconfigPath, retain, and waitDuration support
+
+	// Load config from file or use defaults
+	var kipodCfg *config.ClusterConfig
+	var err error
+
+	if configFile != "" {
+		kipodCfg, err = config.LoadFromFile(configFile)
+		if err != nil {
+			return fmt.Errorf("failed to load config file: %w", err)
+		}
+		if !quietMode {
+			style.Header("Using configuration from: %s", configFile)
+		}
+	} else {
+		kipodCfg = config.DefaultConfig()
+	}
+
+	// Override cluster name if provided via flag
+	if name != "" {
+		kipodCfg.Name = name
+	}
+
+	// Map config to cluster.Config
 	cfg := &cluster.Config{
-		Name: name,
-		Nodes: 1,
+		Name:          kipodCfg.Name,
+		Nodes:         kipodCfg.Nodes.ControlPlanes + kipodCfg.Nodes.Workers,
+		ControlPlanes: kipodCfg.Nodes.ControlPlanes,
+		Workers:       kipodCfg.Nodes.Workers,
+		Image:         nodeImage, // Use flag value if provided
+		PodSubnet:     kipodCfg.Networking.PodSubnet,
+		ServiceSubnet: kipodCfg.Networking.ServiceSubnet,
+		CgroupManager: kipodCfg.CgroupManager,
+		// Local builds
+		CRIOBinary: kipodCfg.LocalBuilds.CRIOBinary,
+		CrunBinary: kipodCfg.LocalBuilds.CrunBinary,
+		RuncBinary: kipodCfg.LocalBuilds.RuncBinary,
+		Retain:     retain,
+	}
+
+	if waitDuration != "" {
+		d, err := time.ParseDuration(waitDuration)
+		if err != nil {
+			return fmt.Errorf("invalid wait duration: %w", err)
+		}
+		cfg.WaitDuration = d
+	}
+
+	// Validate local build paths exist
+	if cfg.CRIOBinary != "" {
+		if _, err := os.Stat(cfg.CRIOBinary); err != nil {
+			return fmt.Errorf("CRI-O binary not found at %s: %w", cfg.CRIOBinary, err)
+		}
+		if !quietMode {
+			style.Header("Using local CRI-O binary: %s", cfg.CRIOBinary)
+		}
+	}
+	if cfg.CrunBinary != "" {
+		if _, err := os.Stat(cfg.CrunBinary); err != nil {
+			return fmt.Errorf("crun binary not found at %s: %w", cfg.CrunBinary, err)
+		}
+		if !quietMode {
+			style.Header("Using local crun binary: %s", cfg.CrunBinary)
+		}
+	}
+	if cfg.RuncBinary != "" {
+		if _, err := os.Stat(cfg.RuncBinary); err != nil {
+			return fmt.Errorf("runc binary not found at %s: %w", cfg.RuncBinary, err)
+		}
+		if !quietMode {
+			style.Header("Using local runc binary: %s", cfg.RuncBinary)
+		}
 	}
 
 	c, err := cluster.NewCluster(cfg)
@@ -21,22 +96,74 @@ func createCluster(name, configFile string) error {
 		return fmt.Errorf("failed to provision cluster: %w", err)
 	}
 
-	fmt.Printf("\nCluster '%s' created successfully!\n", name)
-	fmt.Printf("\nTo interact with your cluster:\n")
-	fmt.Printf("  podman exec %s-control-plane-0 cat /etc/kubernetes/admin.conf > ~/.kube/%s-config\n", name, name)
-	fmt.Printf("  export KUBECONFIG=~/.kube/%s-config\n", name)
-	fmt.Printf("  kubectl get nodes\n")
+	// Automatically export kubeconfig
+	// fmt.Printf("\nExporting kubeconfig...\n")
+	kubeconfig, err := cluster.GetKubeconfig(name)
+	if err != nil {
+		return fmt.Errorf("failed to get kubeconfig: %w", err)
+	}
+
+	// Patch kubeconfig to use localhost instead of the container/host IP
+	// This is necessary because the API server is published on localhost:6443
+	kubeconfigPatched := patchKubeconfigServer(kubeconfig)
+
+	// Create .kube directory if it doesn't exist
+	kubeconfigDir := fmt.Sprintf("%s/.kube", os.Getenv("HOME"))
+	if err := os.MkdirAll(kubeconfigDir, 0755); err != nil {
+		return fmt.Errorf("failed to create .kube directory: %w", err)
+	}
+
+	// Write kubeconfig to file
+	exportedPath := fmt.Sprintf("%s/%s-config", kubeconfigDir, name)
+	if kubeconfigPath != "" {
+		exportedPath = kubeconfigPath
+	}
+	if err := os.WriteFile(exportedPath, []byte(kubeconfigPatched), 0600); err != nil {
+		return fmt.Errorf("failed to write kubeconfig: %w", err)
+	}
+
+	if !quietMode {
+		style.Header("\nCluster %q created successfully!", name)
+		style.Header("\nTo start using your cluster, run:")
+		style.Header("  export KUBECONFIG=%s", exportedPath)
+		style.Header("  kubectl get nodes")
+	}
 
 	return nil
 }
 
-func deleteCluster(name string) error {
+func deleteCluster(name, kubeconfigPath string) error {
+	// TODO: Implement kubeconfigPath support (for removing cluster from kubeconfig)
 	if err := cluster.Delete(name); err != nil {
 		return fmt.Errorf("failed to delete cluster: %w", err)
 	}
 
-	fmt.Printf("Cluster '%s' deleted successfully!\n", name)
+	if !quietMode {
+		style.Header("Cluster %q deleted successfully!", name)
+	}
 	return nil
+}
+
+func getKubeconfig(name string, internal bool) error {
+	kubeconfig, err := cluster.GetKubeconfig(name)
+	if err != nil {
+		return fmt.Errorf("failed to get kubeconfig: %w", err)
+	}
+
+	// Patch kubeconfig based on internal flag
+	kubeconfigOutput := kubeconfig
+	if !internal {
+		kubeconfigOutput = patchKubeconfigServer(kubeconfig)
+	}
+
+	fmt.Print(kubeconfigOutput)
+	return nil
+}
+
+func exportKubeconfig(name, kubeconfigPath string, internal bool) error {
+	// TODO: Implement kubeconfigPath support and merging with existing kubeconfig
+	// For now, just print the kubeconfig like get kubeconfig
+	return getKubeconfig(name, internal)
 }
 
 func listClusters() error {
@@ -56,4 +183,11 @@ func listClusters() error {
 	}
 
 	return nil
+}
+
+// patchKubeconfigServer replaces the server address in kubeconfig with localhost:6443
+func patchKubeconfigServer(kubeconfig string) string {
+	// Replace any server address with localhost:6443
+	re := regexp.MustCompile(`server:\s+https://[^\s:]+:6443`)
+	return re.ReplaceAllString(kubeconfig, "server: https://localhost:6443")
 }

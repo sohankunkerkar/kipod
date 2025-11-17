@@ -2,22 +2,34 @@ package cluster
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/skunkerk/kipod/pkg/build"
 	"github.com/skunkerk/kipod/pkg/podman"
+	"github.com/skunkerk/kipod/pkg/style"
 )
 
 // Config represents cluster configuration
 type Config struct {
 	Name              string
 	Nodes             int
+	ControlPlanes     int
+	Workers           int
 	Image             string
 	KubernetesVersion string
 	PodSubnet         string
 	ServiceSubnet     string
 	Rootless          bool
+	// Local builds for development
+	CRIOBinary    string
+	CrunBinary    string
+	RuncBinary    string
+	CgroupManager string
+	CRIOConfig    string
+	WaitDuration  time.Duration
+	Retain        bool
 }
 
 // Cluster represents a kipod cluster
@@ -34,7 +46,17 @@ func NewCluster(cfg *Config) (*Cluster, error) {
 
 	// Set defaults
 	if cfg.Nodes == 0 {
-		cfg.Nodes = 1
+		if cfg.ControlPlanes == 0 && cfg.Workers == 0 {
+			cfg.Nodes = 1
+			cfg.ControlPlanes = 1
+		} else {
+			cfg.Nodes = cfg.ControlPlanes + cfg.Workers
+		}
+	}
+	// Ensure at least one control plane
+	if cfg.ControlPlanes == 0 {
+		cfg.ControlPlanes = 1
+		cfg.Nodes = cfg.ControlPlanes + cfg.Workers
 	}
 	if cfg.Image == "" {
 		// Use the pre-built kipod node image
@@ -61,7 +83,12 @@ func NewCluster(cfg *Config) (*Cluster, error) {
 }
 
 // Create provisions the cluster
-func (c *Cluster) Create() error {
+func (c *Cluster) Create() (err error) {
+	defer func() {
+		if err != nil {
+			c.cleanupOnFailure()
+		}
+	}()
 	// Check if node image exists
 	imageExists, err := build.ImageExists(c.config.Image)
 	if err != nil {
@@ -71,8 +98,22 @@ func (c *Cluster) Create() error {
 		return fmt.Errorf("node image '%s' not found. Please build it first with: kipod build node-image", c.config.Image)
 	}
 
-	fmt.Printf("Using node image: %s\n", c.config.Image)
-	fmt.Println("Creating cluster nodes...")
+	style.Step("Ensuring node image (%s) 🖼", c.config.Image)
+
+	// Create shared network
+	networkName := "kipod"
+	exists, err := podman.NetworkExists(networkName)
+	if err != nil {
+		return fmt.Errorf("failed to check network existence: %w", err)
+	}
+	if !exists {
+		style.Step("Preparing network 🌐")
+		if err := podman.CreateNetwork(networkName); err != nil {
+			return fmt.Errorf("failed to create network: %w", err)
+		}
+	}
+
+	style.Step("Preparing nodes 📦")
 
 	// For MVP, create a single control-plane node
 	nodeID, err := c.createNode("control-plane", 0)
@@ -82,25 +123,138 @@ func (c *Cluster) Create() error {
 	c.nodeIDs = append(c.nodeIDs, nodeID)
 
 	// Wait for container to be ready
-	fmt.Println("Waiting for node to initialize...")
-	time.Sleep(5 * time.Second)
+	style.Step("Starting control-plane 🕹️")
+	// Initial wait for systemd to start
+	time.Sleep(2 * time.Second)
 
 	// Verify services are running
-	fmt.Println("Verifying services...")
+	// Verifying services...
 	if err := c.waitForServices(nodeID); err != nil {
 		return fmt.Errorf("services failed to start: %w", err)
 	}
 
-	fmt.Println("Initializing Kubernetes cluster...")
+	style.Step("Initializing Kubernetes ☸️")
 	if err := c.initKubernetes(nodeID); err != nil {
 		return fmt.Errorf("failed to initialize Kubernetes: %w", err)
+	}
+
+	// Warn about HA support
+	if c.config.ControlPlanes > 1 {
+		fmt.Printf("Warning: Multi-control-plane (HA) support is not fully implemented yet. Only the first control-plane will be initialized.\n")
+	}
+
+	// Get join command from control-plane
+	// Retrieving join command...
+	joinCmd, err := c.getJoinCommand(nodeID)
+	if err != nil {
+		return fmt.Errorf("failed to get join command: %w", err)
+	}
+
+	// Create worker nodes
+	for i := 0; i < c.config.Workers; i++ {
+		workerID, err := c.createNode("worker", i)
+		if err != nil {
+			return fmt.Errorf("failed to create worker node %d: %w", i, err)
+		}
+		c.nodeIDs = append(c.nodeIDs, workerID)
+
+		style.Step("Waiting for worker-%d to initialize... ⏳", i)
+		time.Sleep(5 * time.Second)
+
+		if err := c.waitForServices(workerID); err != nil {
+			return fmt.Errorf("worker-%d services failed to start: %w", i, err)
+		}
+
+		style.Step("Joining worker-%d to cluster... 🔗", i)
+		if err := c.joinWorker(workerID, joinCmd); err != nil {
+			return fmt.Errorf("failed to join worker-%d: %w", i, err)
+		}
+
+		// Label the worker node
+		workerName := fmt.Sprintf("%s-worker-%d", c.config.Name, i)
+		style.Step("Labeling worker-%d as 'worker'... 🏷️", i)
+		labelCmd := fmt.Sprintf("kubectl label node %s node-role.kubernetes.io/worker=", workerName)
+		if _, err := podman.Exec(nodeID, []string{"sh", "-c", labelCmd}); err != nil {
+			fmt.Printf("  Warning: failed to label worker node %s: %v\n", workerName, err)
+		}
 	}
 
 	return nil
 }
 
+func (c *Cluster) cleanupOnFailure() {
+	if c.config.Retain {
+		style.Info("Retaining nodes for debugging due to --retain flag")
+		return
+	}
+
+	// Only cleanup if we have created nodes
+	if len(c.nodeIDs) > 0 {
+		style.Info("Cleaning up failed cluster...")
+		for _, nodeID := range c.nodeIDs {
+			podman.DeleteContainer(nodeID)
+		}
+	}
+}
+
+func (c *Cluster) getJoinCommand(controlPlaneID string) (string, error) {
+	// Generate a new token and print the join command
+	cmd := "kubeadm token create --print-join-command"
+	output, err := podman.Exec(controlPlaneID, []string{"sh", "-c", cmd})
+	if err != nil {
+		return "", fmt.Errorf("failed to generate join command: %w", err)
+	}
+	return strings.TrimSpace(output), nil
+}
+
+func (c *Cluster) joinWorker(workerID, joinCmd string) error {
+	// Run the join command on the worker
+	// We need to ignore preflight errors similar to init
+	fullCmd := fmt.Sprintf("%s --ignore-preflight-errors=NumCPU,Mem,SystemVerification,FileContent--proc-sys-net-bridge-bridge-nf-call-iptables --v=5", joinCmd)
+
+	output, err := podman.Exec(workerID, []string{"sh", "-c", fullCmd})
+	if err != nil {
+		return fmt.Errorf("kubeadm join failed: %w\nOutput:\n%s", err, output)
+	}
+	return nil
+}
+
 func (c *Cluster) createNode(role string, index int) (string, error) {
 	nodeName := fmt.Sprintf("%s-%s-%d", c.config.Name, role, index)
+
+	opts := c.createContainerOptions(nodeName, role)
+
+	containerID, err := podman.CreateContainer(opts)
+	if err != nil {
+		return "", fmt.Errorf("failed to create container: %w", err)
+	}
+
+	// fmt.Printf("  Created node: %s (ID: %s)\n", nodeName, containerID[:12])
+
+	if err := c.installLocalBinaries(containerID); err != nil {
+		return "", err
+	}
+
+	return containerID, nil
+}
+
+func (c *Cluster) createContainerOptions(nodeName, role string) podman.CreateContainerOptions {
+	// Pass KIPOD_CGROUP_MANAGER to the container
+	cgroupMgr := c.config.CgroupManager
+	if cgroupMgr == "" {
+		cgroupMgr = os.Getenv("KIPOD_CGROUP_MANAGER")
+	}
+
+	env := []string{}
+	if cgroupMgr != "" {
+		env = append(env, fmt.Sprintf("KIPOD_CGROUP_MANAGER=%s", cgroupMgr))
+	}
+
+	// Only set _CRIO_ROOTLESS=1 if using cgroupfs
+	// If using systemd, we want CRI-O to use the system bus (as root inside container)
+	if cgroupMgr == "cgroupfs" {
+		env = append(env, "_CRIO_ROOTLESS=1")
+	}
 
 	opts := podman.CreateContainerOptions{
 		Name:     nodeName,
@@ -108,25 +262,62 @@ func (c *Cluster) createNode(role string, index int) (string, error) {
 		Hostname: nodeName,
 		Rootless: c.config.Rootless,
 		Cgroupns: "private",
+		Network:  "kipod",
 		Labels: map[string]string{
 			podman.LabelCluster: c.config.Name,
 			podman.LabelRole:    role,
 		},
+		Env: env,
 	}
 
-	// Set _CRIO_ROOTLESS=1 to enable CRI-O rootless mode inside the container
-	// This tells CRI-O to handle nested containers in a rootless-friendly way
-	// Note: The outer Podman container still runs with --privileged for kubelet
-	opts.Env = []string{"_CRIO_ROOTLESS=1"}
-
-	containerID, err := podman.CreateContainer(opts)
-	if err != nil {
-		return "", fmt.Errorf("failed to create container: %w", err)
+	// Mount local builds for development
+	if c.config.CRIOBinary != "" {
+		opts.Volumes = append(opts.Volumes, fmt.Sprintf("%s:/usr/local/bin/crio-custom:ro", c.config.CRIOBinary))
+	}
+	if c.config.CrunBinary != "" {
+		opts.Volumes = append(opts.Volumes, fmt.Sprintf("%s:/usr/local/bin/crun-custom:ro", c.config.CrunBinary))
+	}
+	if c.config.RuncBinary != "" {
+		opts.Volumes = append(opts.Volumes, fmt.Sprintf("%s:/usr/local/bin/runc-custom:ro", c.config.RuncBinary))
 	}
 
-	fmt.Printf("  Created node: %s (ID: %s)\n", nodeName, containerID[:12])
+	// Mount CRI-O config if provided
+	if c.config.CRIOConfig != "" {
+		opts.Volumes = append(opts.Volumes, fmt.Sprintf("%s:/tmp/crio-user-config.conf:ro", c.config.CRIOConfig))
+	}
 
-	return containerID, nil
+	// Publish API server port for control-plane nodes
+	if role == "control-plane" {
+		opts.Ports = []string{"6443:6443"}
+	}
+
+	return opts
+}
+
+func (c *Cluster) installLocalBinaries(containerID string) error {
+	// Replace system binaries with local builds
+	if c.config.CRIOBinary != "" {
+		style.Info("Installing local CRI-O binary...")
+		if _, err := podman.Exec(containerID, []string{"cp", "/usr/local/bin/crio-custom", "/usr/bin/crio"}); err != nil {
+			return fmt.Errorf("failed to install local CRI-O: %w", err)
+		}
+	}
+	if c.config.CrunBinary != "" {
+		style.Info("Installing local crun binary...")
+		// Replace the wrapper with local build
+		if _, err := podman.Exec(containerID, []string{"cp", "/usr/bin/crun.real", "/usr/bin/crun.real.bak"}); err == nil {
+			if _, err := podman.Exec(containerID, []string{"cp", "/usr/local/bin/crun-custom", "/usr/bin/crun.real"}); err != nil {
+				return fmt.Errorf("failed to install local crun: %w", err)
+			}
+		}
+	}
+	if c.config.RuncBinary != "" {
+		style.Info("Installing local runc binary...")
+		if _, err := podman.Exec(containerID, []string{"cp", "/usr/local/bin/runc-custom", "/usr/bin/runc"}); err != nil {
+			return fmt.Errorf("failed to install local runc: %w", err)
+		}
+	}
+	return nil
 }
 
 func (c *Cluster) waitForServices(containerID string) error {
@@ -137,7 +328,7 @@ func (c *Cluster) waitForServices(containerID string) error {
 		if err == nil {
 			status := strings.TrimSpace(output)
 			if status == "running" || status == "degraded" {
-				fmt.Printf("  Systemd is %s\n", status)
+				// fmt.Printf("  Systemd is %s\n", status)
 				break
 			}
 		}
@@ -153,7 +344,7 @@ func (c *Cluster) waitForServices(containerID string) error {
 	for i := 0; i < maxRetries; i++ {
 		_, err := podman.Exec(containerID, []string{"systemctl", "is-active", "crio"})
 		if err == nil {
-			fmt.Println("  CRI-O is running")
+			// fmt.Println("  CRI-O is running")
 			break
 		}
 
@@ -173,38 +364,15 @@ func (c *Cluster) waitForServices(containerID string) error {
 		return fmt.Errorf("CRI-O is not functional: %w\nLogs:\n%s", err, logs)
 	}
 
-	fmt.Println("  CRI-O is functional")
+	// fmt.Println("  CRI-O is functional")
 	return nil
 }
 
 func (c *Cluster) initKubernetes(containerID string) error {
-	// Load pre-downloaded Kubernetes images to avoid nested image pulling issues
-	fmt.Println("  Loading pre-downloaded Kubernetes images...")
-	loadImagesCmd := `for tarball in /kind/images/*.tar; do
-		if [ -f "$tarball" ]; then
-			echo "Loading $(basename $tarball)..."
-			# Convert filename back to image reference: replace all _ with /, then last / with :
-			image_ref=$(basename "$tarball" .tar | sed 's/_/\//g; s/\/\([^/]*\)$/:\1/')
-			skopeo copy docker-archive:$tarball containers-storage:$image_ref
-		fi
-	done`
-
-	if _, err := podman.Exec(containerID, []string{"sh", "-c", loadImagesCmd}); err != nil {
-		fmt.Printf("Warning: Failed to load some images: %v\n", err)
-	}
-
-	// Initialize Kubernetes using kubeadm
-	initCmd := fmt.Sprintf(`kubeadm init \
-  --pod-network-cidr=%s \
-  --service-cidr=%s \
-  --cri-socket=unix:///var/run/crio/crio.sock \
-  --ignore-preflight-errors=NumCPU,Mem,SystemVerification,FileContent--proc-sys-net-bridge-bridge-nf-call-iptables \
-  --v=5`, c.config.PodSubnet, c.config.ServiceSubnet)
-
-	fmt.Println("  Running kubeadm init (this may take a few minutes)...")
-	output, err := podman.Exec(containerID, []string{"sh", "-c", initCmd})
-	if err != nil {
-		return fmt.Errorf("kubeadm init failed: %w\nOutput:\n%s", err, output)
+	style.Step("Writing configuration 📜")
+	// fmt.Println("  Running kubeadm init (this may take a few minutes)...")
+	if err := c.runKubeadmInit(containerID); err != nil {
+		return err
 	}
 
 	// Set up kubeconfig for root user
@@ -217,8 +385,12 @@ chmod 600 /root/.kube/config`
 	}
 
 	// Wait for API server to be ready
-	fmt.Println("  Waiting for API server...")
-	maxRetries := 60
+	timeout := c.config.WaitDuration
+	if timeout == 0 {
+		timeout = 5 * time.Minute // Default timeout
+	}
+	style.Step("Waiting ≤ %s for control-plane = Ready ⏳", timeout)
+	maxRetries := int(timeout.Seconds() / 2)
 	for i := 0; i < maxRetries; i++ {
 		_, err := podman.Exec(containerID, []string{"kubectl", "get", "nodes"})
 		if err == nil {
@@ -233,13 +405,24 @@ chmod 600 /root/.kube/config`
 	}
 
 	// Remove control-plane taint (for single-node cluster)
-	fmt.Println("  Configuring single-node cluster...")
+	// fmt.Println("  Configuring single-node cluster...")
 	taintCmd := "kubectl taint nodes --all node-role.kubernetes.io/control-plane- || true"
 	if _, err := podman.Exec(containerID, []string{"sh", "-c", taintCmd}); err != nil {
 		fmt.Printf("  Warning: failed to remove control-plane taint: %v\n", err)
 	}
 
-	fmt.Println("  Kubernetes cluster initialized successfully")
+	// Patch kube-proxy to skip privileged sysctl operations
+	// This is needed for rootless containers that can't set nf_conntrack_max
+	// fmt.Println("  Patching kube-proxy for rootless compatibility...")
+	patchCmd := `kubectl get configmap -n kube-system kube-proxy -o yaml | \
+	sed 's/maxPerCore:.*/maxPerCore: 0/' | \
+	kubectl apply -f - && \
+	kubectl rollout restart daemonset/kube-proxy -n kube-system`
+	if _, err := podman.Exec(containerID, []string{"sh", "-c", patchCmd}); err != nil {
+		fmt.Printf("  Warning: failed to patch kube-proxy: %v\n", err)
+	}
+
+	style.Success("Ready")
 	return nil
 }
 
@@ -256,12 +439,12 @@ func Delete(name string) error {
 		return fmt.Errorf("cluster '%s' not found", name)
 	}
 
-	fmt.Printf("Deleting %d node(s)...\n", len(containers))
+	style.Step("Deleting %d node(s)... 🗑️", len(containers))
 	for _, container := range containers {
 		if err := podman.DeleteContainer(container.ID); err != nil {
 			return fmt.Errorf("failed to delete container %s: %w", container.Name, err)
 		}
-		fmt.Printf("  Deleted node: %s\n", container.Name)
+		style.Info("Deleted node: %s", container.Name)
 	}
 
 	return nil
@@ -278,10 +461,15 @@ func List() ([]string, error) {
 
 	clusterMap := make(map[string]bool)
 	for _, container := range containers {
-		// Extract cluster name from labels or container name
-		parts := strings.Split(container.Name, "-")
-		if len(parts) > 0 {
-			clusterMap[parts[0]] = true
+		// Extract cluster name from labels
+		if name, ok := container.Labels[podman.LabelCluster]; ok && name != "" {
+			clusterMap[name] = true
+		} else {
+			// Fallback to extracting from container name
+			parts := strings.Split(container.Name, "-")
+			if len(parts) > 0 {
+				clusterMap[parts[0]] = true
+			}
 		}
 	}
 
@@ -291,4 +479,46 @@ func List() ([]string, error) {
 	}
 
 	return clusters, nil
+}
+
+// GetKubeconfig retrieves the kubeconfig for a cluster
+func GetKubeconfig(name string) (string, error) {
+	containers, err := podman.ListContainers(map[string]string{
+		podman.LabelCluster: name,
+		podman.LabelRole:    "control-plane",
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to list cluster containers: %w", err)
+	}
+
+	if len(containers) == 0 {
+		return "", fmt.Errorf("cluster '%s' not found", name)
+	}
+
+	// Get kubeconfig from the control-plane node
+	kubeconfig, err := podman.Exec(containers[0].ID, []string{"cat", "/etc/kubernetes/admin.conf"})
+	if err != nil {
+		return "", fmt.Errorf("failed to retrieve kubeconfig: %w", err)
+	}
+
+	return kubeconfig, nil
+}
+
+func (c *Cluster) runKubeadmInit(containerID string) error {
+	// Images will be pulled on-demand by kubeadm (optimized - no pre-loading needed)
+	// Initialize Kubernetes using kubeadm
+	// Include localhost and 127.0.0.1 in API server certificate SANs for port-forwarded access
+	initCmd := fmt.Sprintf(`kubeadm init \
+  --pod-network-cidr=%s \
+  --service-cidr=%s \
+  --cri-socket=unix:///var/run/crio/crio.sock \
+  --apiserver-cert-extra-sans=localhost,127.0.0.1 \
+  --ignore-preflight-errors=NumCPU,Mem,SystemVerification,FileContent--proc-sys-net-bridge-bridge-nf-call-iptables \
+  --v=5`, c.config.PodSubnet, c.config.ServiceSubnet)
+
+	output, err := podman.Exec(containerID, []string{"sh", "-c", initCmd})
+	if err != nil {
+		return fmt.Errorf("kubeadm init failed: %w\nOutput:\n%s", err, output)
+	}
+	return nil
 }

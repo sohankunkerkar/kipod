@@ -1,0 +1,7 @@
+apiVersion: v1alpha1
+kind: ClusterConfig
+name: systemd-test
+cgroupManager: systemd
+nodes:
+  controlPlanes: 1
+  workers: 0

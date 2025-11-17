@@ -35,7 +35,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		PauseImage:    "registry.k8s.io/pause:3.9",
-		CgroupManager: "systemd",
+		CgroupManager: "cgroupfs",
 		ConmonCgroup:  "pod",
 		RuntimeType:   "oci",
 		RuntimePath:   "/usr/bin/runc",

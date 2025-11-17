@@ -1,0 +1,30 @@
+# Local Development Configuration
+# Use local builds of CRI-O, crun, or runc for development/testing
+apiVersion: v1alpha1
+kind: ClusterConfig
+
+name: dev-cluster
+
+# Use default latest Kubernetes version
+versions:
+  kubernetes: "1.34.2"
+  crio: "1.34"  # Still specify version for compatibility check
+
+# Mount local development builds
+localBuilds:
+  # Path to locally built CRI-O binary
+  crioBinary: /home/skunkerk/dev/src/github.com/cri-o/cri-o/bin/crio
+
+  # Path to locally built crun binary (optional)
+  # crunBinary: /home/user/dev/crun/crun
+
+  # Path to locally built runc binary (optional)
+  # runcBinary: /home/user/dev/runc/runc
+
+# Single node for quick testing
+nodes:
+  controlPlanes: 1
+  workers: 0
+
+# Use cgroupfs for simplicity in development
+cgroupManager: cgroupfs

@@ -1,5 +1,5 @@
 # Binaries
-kipod
+bin/
 *.exe
 *.dll
 *.so
