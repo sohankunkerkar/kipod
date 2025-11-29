@@ -51,6 +51,9 @@ func createCluster(name, configFile, nodeImage, kubeconfigPath string, retain bo
 		PodSubnet:     kipodCfg.Networking.PodSubnet,
 		ServiceSubnet: kipodCfg.Networking.ServiceSubnet,
 		CgroupManager: kipodCfg.CgroupManager,
+		// Storage
+		StorageType: kipodCfg.Storage.Type,
+		StorageSize: kipodCfg.Storage.Size,
 		// Local builds
 		CRIOBinary: kipodCfg.LocalBuilds.CRIOBinary,
 		CrunBinary: kipodCfg.LocalBuilds.CrunBinary,

@@ -242,3 +242,12 @@ func CreateNetwork(name string) error {
 	}
 	return nil
 }
+
+// DeleteVolume deletes a podman volume
+func DeleteVolume(name string) error {
+	cmd := exec.Command("podman", "volume", "rm", "-f", name)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to delete volume: %w\nOutput: %s", err, output)
+	}
+	return nil
+}

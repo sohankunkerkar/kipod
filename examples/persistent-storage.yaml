@@ -1,0 +1,6 @@
+name: persistent-cluster
+nodes:
+  controlPlanes: 1
+  workers: 0
+storage:
+  type: volume

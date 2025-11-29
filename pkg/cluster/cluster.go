@@ -28,6 +28,8 @@ type Config struct {
 	RuncBinary    string
 	CgroupManager string
 	CRIOConfig    string
+	StorageType   string
+	StorageSize   string
 	WaitDuration  time.Duration
 	Retain        bool
 }
@@ -269,9 +271,22 @@ func (c *Cluster) createContainerOptions(nodeName, role string) podman.CreateCon
 			podman.LabelRole:    role,
 		},
 		Env: env,
+	}
+
+	// Configure container storage
+	if c.config.StorageType == "volume" {
+		// Use named volume for storage - enables persistence and avoids overlay-on-overlay
+		// (overlay-on-bind-mount works fine)
+		volName := fmt.Sprintf("kipod-storage-%s", nodeName)
+		opts.Volumes = append(opts.Volumes, fmt.Sprintf("%s:/var/lib/containers/storage", volName))
+	} else {
 		// Use tmpfs for container storage - enables native overlay support
 		// (overlay-on-overlay doesn't work, but overlay-on-tmpfs does)
-		Tmpfs: []string{"/var/lib/containers/storage:rw,size=10G"},
+		size := c.config.StorageSize
+		if size == "" {
+			size = "10G"
+		}
+		opts.Tmpfs = []string{fmt.Sprintf("/var/lib/containers/storage:rw,size=%s", size)}
 	}
 
 	// Mount local builds for development
@@ -448,6 +463,12 @@ func Delete(name string) error {
 			return fmt.Errorf("failed to delete container %s: %w", container.Name, err)
 		}
 		style.Info("Deleted node: %s", container.Name)
+
+		// Try to delete associated storage volume
+		volName := fmt.Sprintf("kipod-storage-%s", container.Name)
+		// We ignore errors here because the volume might not exist (if using tmpfs)
+		// or might have been deleted already.
+		_ = podman.DeleteVolume(volName)
 	}
 
 	return nil

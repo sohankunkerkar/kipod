@@ -11,6 +11,10 @@
 - 🔒 Fully rootless – no privileged daemon required.
 - 🛠️ Supports custom Kubernetes versions and image tags.
 
+## Why Kipod?
+
+While **kind** is excellent, it is designed for Docker and containerd. **kipod** is built specifically for the **Podman + CRI-O** ecosystem. It runs fully rootless by default, supports custom CRI-O builds out-of-the-box, and doesn't require a daemon, making it the ideal choice for Fedora/Red Hat users and CRI-O developers.
+
 ---
 
 ## Prerequisites
@@ -117,6 +121,16 @@ Choose between `cgroupfs` (default, rootless-friendly) or `systemd`:
 
 ```yaml
 cgroupManager: systemd  # or "cgroupfs"
+```
+
+#### Storage
+
+Configure container storage backend. Use `volume` for persistence and advanced features (like Spegel), or `tmpfs` (default) for speed and simplicity.
+
+```yaml
+storage:
+  type: volume  # or "tmpfs"
+  # size: 20G   # optional, mostly for tmpfs
 ```
 
 ### Advanced: Custom CRI-O Binary

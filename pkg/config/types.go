@@ -38,6 +38,9 @@ type ClusterConfig struct {
 	// CRIOConfig is path to a CRI-O config file to inject into /etc/crio/crio.conf.d/99-user.conf
 	CRIOConfig string `yaml:"crioConfig,omitempty" json:"crioConfig,omitempty"`
 
+	// Storage configuration
+	Storage StorageConfig `yaml:"storage,omitempty" json:"storage,omitempty"`
+
 	// Deprecated fields (kept for backward compatibility)
 	// CRIOVersion is deprecated, use Versions.CRIO instead
 	CRIOVersion string `yaml:"crioVersion,omitempty" json:"crioVersion,omitempty"`
@@ -103,6 +106,15 @@ type NetworkingConfig struct {
 
 	// DNSdomain is the cluster DNS domain
 	DNSDomain string `yaml:"dnsDomain,omitempty" json:"dnsDomain,omitempty"`
+}
+
+// StorageConfig defines container storage configuration
+type StorageConfig struct {
+	// Type of storage: "tmpfs" (default) or "volume"
+	Type string `yaml:"type,omitempty" json:"type,omitempty"`
+
+	// Size of storage (e.g. "10G") - primarily for tmpfs
+	Size string `yaml:"size,omitempty" json:"size,omitempty"`
 }
 
 // DefaultConfig returns a default cluster configuration with latest versions
@@ -196,6 +208,14 @@ func (c *ClusterConfig) Normalize() {
 	// Set cgroup manager default
 	if c.CgroupManager == "" {
 		c.CgroupManager = "cgroupfs"
+	}
+
+	// Set storage defaults
+	if c.Storage.Type == "" {
+		c.Storage.Type = "tmpfs"
+	}
+	if c.Storage.Size == "" {
+		c.Storage.Size = "10G"
 	}
 }
 
