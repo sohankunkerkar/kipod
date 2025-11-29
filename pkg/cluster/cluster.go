@@ -277,8 +277,9 @@ func (c *Cluster) createContainerOptions(nodeName, role string) podman.CreateCon
 	if c.config.StorageType == "volume" {
 		// Use named volume for storage - enables persistence and avoids overlay-on-overlay
 		// (overlay-on-bind-mount works fine)
+		// We use :shared propagation to allow CRI-O to create sub-mounts visible to the container
 		volName := fmt.Sprintf("kipod-storage-%s", nodeName)
-		opts.Volumes = append(opts.Volumes, fmt.Sprintf("%s:/var/lib/containers/storage", volName))
+		opts.Volumes = append(opts.Volumes, fmt.Sprintf("%s:/var/lib/containers/storage:shared", volName))
 	} else {
 		// Use tmpfs for container storage - enables native overlay support
 		// (overlay-on-overlay doesn't work, but overlay-on-tmpfs does)
