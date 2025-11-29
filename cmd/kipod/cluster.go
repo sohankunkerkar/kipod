@@ -7,9 +7,9 @@ import (
 
 	"time"
 
-	"github.com/skunkerk/kipod/pkg/cluster"
-	"github.com/skunkerk/kipod/pkg/config"
-	"github.com/skunkerk/kipod/pkg/style"
+	"github.com/sohankunkerkar/kipod/pkg/cluster"
+	"github.com/sohankunkerkar/kipod/pkg/config"
+	"github.com/sohankunkerkar/kipod/pkg/style"
 )
 
 func createCluster(name, configFile, nodeImage, kubeconfigPath string, retain bool, waitDuration string) error {
@@ -24,9 +24,6 @@ func createCluster(name, configFile, nodeImage, kubeconfigPath string, retain bo
 		if err != nil {
 			return fmt.Errorf("failed to load config file: %w", err)
 		}
-		if !quietMode {
-			style.Header("Using configuration from: %s", configFile)
-		}
 	} else {
 		kipodCfg = config.DefaultConfig()
 	}
@@ -34,6 +31,14 @@ func createCluster(name, configFile, nodeImage, kubeconfigPath string, retain bo
 	// Override cluster name if provided via flag
 	if name != "" {
 		kipodCfg.Name = name
+	}
+
+	// Print header now that we know the cluster name
+	if !quietMode {
+		style.Header("Creating cluster %q ...", kipodCfg.Name)
+		if configFile != "" {
+			style.Header("Using configuration from: %s", configFile)
+		}
 	}
 
 	// Map config to cluster.Config
@@ -96,9 +101,12 @@ func createCluster(name, configFile, nodeImage, kubeconfigPath string, retain bo
 		return fmt.Errorf("failed to provision cluster: %w", err)
 	}
 
+	// Use the final cluster name (from config or flag override)
+	clusterName := kipodCfg.Name
+
 	// Automatically export kubeconfig
 	// fmt.Printf("\nExporting kubeconfig...\n")
-	kubeconfig, err := cluster.GetKubeconfig(name)
+	kubeconfig, err := cluster.GetKubeconfig(clusterName)
 	if err != nil {
 		return fmt.Errorf("failed to get kubeconfig: %w", err)
 	}
@@ -114,7 +122,7 @@ func createCluster(name, configFile, nodeImage, kubeconfigPath string, retain bo
 	}
 
 	// Write kubeconfig to file
-	exportedPath := fmt.Sprintf("%s/%s-config", kubeconfigDir, name)
+	exportedPath := fmt.Sprintf("%s/%s-config", kubeconfigDir, clusterName)
 	if kubeconfigPath != "" {
 		exportedPath = kubeconfigPath
 	}
@@ -123,7 +131,7 @@ func createCluster(name, configFile, nodeImage, kubeconfigPath string, retain bo
 	}
 
 	if !quietMode {
-		style.Header("\nCluster %q created successfully!", name)
+		style.Header("\nCluster %q created successfully!", clusterName)
 		style.Header("\nTo start using your cluster, run:")
 		style.Header("  export KUBECONFIG=%s", exportedPath)
 		style.Header("  kubectl get nodes")

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/skunkerk/kipod/pkg/style"
+	"github.com/sohankunkerkar/kipod/pkg/style"
 	"github.com/spf13/cobra"
 )
 
@@ -76,14 +76,9 @@ func createClusterCmd() *cobra.Command {
 				clusterName = args[0]
 			}
 
-			// Default cluster name
-			if clusterName == "" {
-				clusterName = "kipod"
-			}
+			// Note: Don't default clusterName here - let createCluster use the config file name
+			// The default "kipod" is set in the config's Normalize() method
 
-			if !quietMode {
-				style.Header("Creating cluster %q ...", clusterName)
-			}
 			return createCluster(clusterName, configFile, nodeImage, kubeconfigPath, retain, waitDuration)
 		},
 	}

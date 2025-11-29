@@ -27,7 +27,7 @@
 
 ### From source
 ```bash
-git clone https://github.com/skunkerk/kipod.git
+git clone https://github.com/sohankunkerkar/kipod.git
 cd kipod
 go build -o bin/kipod ./cmd/kipod
 sudo mv bin/kipod /usr/local/bin/   # optional

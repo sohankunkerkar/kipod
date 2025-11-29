@@ -1,0 +1,6 @@
+name: spegel-cluster
+nodes:
+  controlPlanes: 1
+  workers: 2
+cgroupManager: systemd
+crioConfig: ./examples/crio-blob-cache.conf

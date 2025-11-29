@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/skunkerk/kipod/pkg/build"
-	"github.com/skunkerk/kipod/pkg/podman"
-	"github.com/skunkerk/kipod/pkg/style"
+	"github.com/sohankunkerkar/kipod/pkg/build"
+	"github.com/sohankunkerkar/kipod/pkg/podman"
+	"github.com/sohankunkerkar/kipod/pkg/style"
 )
 
 // Config represents cluster configuration
@@ -179,6 +179,7 @@ func (c *Cluster) Create() (err error) {
 		}
 	}
 
+	style.Success("Ready")
 	return nil
 }
 
@@ -268,6 +269,9 @@ func (c *Cluster) createContainerOptions(nodeName, role string) podman.CreateCon
 			podman.LabelRole:    role,
 		},
 		Env: env,
+		// Use tmpfs for container storage - enables native overlay support
+		// (overlay-on-overlay doesn't work, but overlay-on-tmpfs does)
+		Tmpfs: []string{"/var/lib/containers/storage:rw,size=10G"},
 	}
 
 	// Mount local builds for development
@@ -422,7 +426,6 @@ chmod 600 /root/.kube/config`
 		fmt.Printf("  Warning: failed to patch kube-proxy: %v\n", err)
 	}
 
-	style.Success("Ready")
 	return nil
 }
 

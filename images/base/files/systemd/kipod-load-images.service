@@ -1,0 +1,15 @@
+[Unit]
+Description=Load pre-downloaded Kubernetes images into CRI-O
+After=crio.service
+Requires=crio.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/load-images.sh
+
+[Install]
+WantedBy=multi-user.target
+
+
+

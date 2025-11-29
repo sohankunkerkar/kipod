@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 
-	"github.com/skunkerk/kipod/pkg/build"
-	"github.com/skunkerk/kipod/pkg/config"
+	"github.com/sohankunkerkar/kipod/pkg/build"
+	"github.com/sohankunkerkar/kipod/pkg/config"
 )
 
 func buildNodeImage(configFile, k8sVersion, crioVersion, image string, rebuild bool) error {

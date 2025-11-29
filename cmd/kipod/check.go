@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/skunkerk/kipod/pkg/system"
+	"github.com/sohankunkerkar/kipod/pkg/system"
 )
 
 func checkSystem() error {
