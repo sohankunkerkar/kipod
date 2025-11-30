@@ -1,0 +1,8 @@
+name: scheduler-test
+nodes:
+  controlPlanes: 1
+  workers: 0
+scheduler:
+  configPath: /home/skunkerk/dev/src/github.com/kipod/examples/my-scheduler-config.yaml
+  extraArgs:
+    v: "4"

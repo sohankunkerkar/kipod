@@ -41,6 +41,9 @@ type ClusterConfig struct {
 	// Storage configuration
 	Storage StorageConfig `yaml:"storage,omitempty" json:"storage,omitempty"`
 
+	// Scheduler configuration for kube-scheduler customization
+	Scheduler SchedulerConfig `yaml:"scheduler,omitempty" json:"scheduler,omitempty"`
+
 	// Deprecated fields (kept for backward compatibility)
 	// CRIOVersion is deprecated, use Versions.CRIO instead
 	CRIOVersion string `yaml:"crioVersion,omitempty" json:"crioVersion,omitempty"`
@@ -115,6 +118,39 @@ type StorageConfig struct {
 
 	// Size of storage (e.g. "10G") - primarily for tmpfs
 	Size string `yaml:"size,omitempty" json:"size,omitempty"`
+}
+
+// SchedulerConfig defines kube-scheduler configuration
+type SchedulerConfig struct {
+	// ConfigPath is the path to a KubeSchedulerConfiguration file on the host
+	// This file will be mounted into the control-plane node and used by kube-scheduler
+	ConfigPath string `yaml:"configPath,omitempty" json:"configPath,omitempty"`
+
+	// ExtraArgs are additional arguments to pass to kube-scheduler
+	// Example: {"v": "5", "leader-elect": "false"}
+	ExtraArgs map[string]string `yaml:"extraArgs,omitempty" json:"extraArgs,omitempty"`
+
+	// ExtraVolumes are additional volumes to mount into the kube-scheduler pod
+	ExtraVolumes []HostPathMount `yaml:"extraVolumes,omitempty" json:"extraVolumes,omitempty"`
+}
+
+// HostPathMount defines a volume mount from host to container
+type HostPathMount struct {
+	// Name is the name of the volume mount
+	Name string `yaml:"name" json:"name"`
+
+	// HostPath is the path on the host
+	HostPath string `yaml:"hostPath" json:"hostPath"`
+
+	// MountPath is the path inside the container/pod
+	MountPath string `yaml:"mountPath" json:"mountPath"`
+
+	// ReadOnly specifies if the mount should be read-only
+	ReadOnly bool `yaml:"readOnly,omitempty" json:"readOnly,omitempty"`
+
+	// PathType is the type of the host path (File, Directory, etc.)
+	// Defaults to "File" if not specified
+	PathType string `yaml:"pathType,omitempty" json:"pathType,omitempty"`
 }
 
 // DefaultConfig returns a default cluster configuration with latest versions

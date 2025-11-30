@@ -32,6 +32,19 @@ type Config struct {
 	StorageSize   string
 	WaitDuration  time.Duration
 	Retain        bool
+	// Scheduler configuration
+	SchedulerConfigPath string            // Path to KubeSchedulerConfiguration file on host
+	SchedulerExtraArgs  map[string]string // Extra args for kube-scheduler
+	SchedulerExtraVols  []HostPathMount   // Extra volumes for kube-scheduler
+}
+
+// HostPathMount defines a volume mount for kubeadm components
+type HostPathMount struct {
+	Name      string
+	HostPath  string
+	MountPath string
+	ReadOnly  bool
+	PathType  string // File, Directory, etc.
 }
 
 // Cluster represents a kipod cluster
@@ -247,17 +260,19 @@ func (c *Cluster) createContainerOptions(nodeName, role string) podman.CreateCon
 	if cgroupMgr == "" {
 		cgroupMgr = os.Getenv("KIPOD_CGROUP_MANAGER")
 	}
+	// Default to cgroupfs if still empty
+	if cgroupMgr == "" {
+		cgroupMgr = "cgroupfs"
+	}
 
 	env := []string{}
-	if cgroupMgr != "" {
-		env = append(env, fmt.Sprintf("KIPOD_CGROUP_MANAGER=%s", cgroupMgr))
-	}
+	// Always set KIPOD_CGROUP_MANAGER so configure-cgroup-manager.sh knows what to use
+	env = append(env, fmt.Sprintf("KIPOD_CGROUP_MANAGER=%s", cgroupMgr))
 
-	// Only set _CRIO_ROOTLESS=1 if using cgroupfs
-	// If using systemd, we want CRI-O to use the system bus (as root inside container)
-	if cgroupMgr == "cgroupfs" {
-		env = append(env, "_CRIO_ROOTLESS=1")
-	}
+	// Always set _CRIO_ROOTLESS=1 to signal rootless mode
+	// This tells CRI-O to skip privileged operations (like OOM score adjustments)
+	// CRI-O will still use system D-Bus (thanks to our patch detecting UID 0)
+	env = append(env, "_CRIO_ROOTLESS=1")
 
 	opts := podman.CreateContainerOptions{
 		Name:     nodeName,
@@ -306,6 +321,19 @@ func (c *Cluster) createContainerOptions(nodeName, role string) podman.CreateCon
 		opts.Volumes = append(opts.Volumes, fmt.Sprintf("%s:/tmp/crio-user-config.conf:ro", c.config.CRIOConfig))
 	}
 
+	// Mount scheduler config for control-plane nodes
+	if role == "control-plane" && c.config.SchedulerConfigPath != "" {
+		// Mount the scheduler config file to /etc/kubernetes/scheduler-config.yaml
+		opts.Volumes = append(opts.Volumes, fmt.Sprintf("%s:/etc/kubernetes/scheduler-config.yaml:ro", c.config.SchedulerConfigPath))
+	}
+
+	// Mount any extra scheduler volumes for control-plane nodes
+	if role == "control-plane" {
+		for _, vol := range c.config.SchedulerExtraVols {
+			opts.Volumes = append(opts.Volumes, fmt.Sprintf("%s:%s:ro", vol.HostPath, vol.MountPath))
+		}
+	}
+
 	// Publish API server port for control-plane nodes
 	if role == "control-plane" {
 		opts.Ports = []string{"6443:6443"}
@@ -318,7 +346,8 @@ func (c *Cluster) installLocalBinaries(containerID string) error {
 	// Replace system binaries with local builds
 	if c.config.CRIOBinary != "" {
 		style.Info("Installing local CRI-O binary...")
-		if _, err := podman.Exec(containerID, []string{"cp", "/usr/local/bin/crio-custom", "/usr/bin/crio"}); err != nil {
+		// Copy to /usr/local/bin/crio which is where the systemd unit runs from
+		if _, err := podman.Exec(containerID, []string{"cp", "/usr/local/bin/crio-custom", "/usr/local/bin/crio"}); err != nil {
 			return fmt.Errorf("failed to install local CRI-O: %w", err)
 		}
 	}
@@ -435,7 +464,7 @@ chmod 600 /root/.kube/config`
 	// This is needed for rootless containers that can't set nf_conntrack_max
 	// fmt.Println("  Patching kube-proxy for rootless compatibility...")
 	patchCmd := `kubectl get configmap -n kube-system kube-proxy -o yaml | \
-	sed 's/maxPerCore:.*/maxPerCore: 0/' | \
+	sed 's/maxPerCore: null/maxPerCore: 0/; s/conntrackMaxPerCore: null/conntrackMaxPerCore: 0/' | \
 	kubectl apply -f - && \
 	kubectl rollout restart daemonset/kube-proxy -n kube-system`
 	if _, err := podman.Exec(containerID, []string{"sh", "-c", patchCmd}); err != nil {
@@ -530,6 +559,11 @@ func GetKubeconfig(name string) (string, error) {
 }
 
 func (c *Cluster) runKubeadmInit(containerID string) error {
+	// Check if we need to use a kubeadm config file (for scheduler customization)
+	if c.config.SchedulerConfigPath != "" || len(c.config.SchedulerExtraArgs) > 0 || len(c.config.SchedulerExtraVols) > 0 {
+		return c.runKubeadmInitWithConfig(containerID)
+	}
+
 	// Images will be pulled on-demand by kubeadm (optimized - no pre-loading needed)
 	// Initialize Kubernetes using kubeadm
 	// Include localhost and 127.0.0.1 in API server certificate SANs for port-forwarded access
@@ -546,4 +580,92 @@ func (c *Cluster) runKubeadmInit(containerID string) error {
 		return fmt.Errorf("kubeadm init failed: %w\nOutput:\n%s", err, output)
 	}
 	return nil
+}
+
+// runKubeadmInitWithConfig uses a kubeadm config file to support scheduler customization
+func (c *Cluster) runKubeadmInitWithConfig(containerID string) error {
+	// Build the kubeadm config YAML
+	kubeadmConfig := c.generateKubeadmConfig()
+
+	// Write the config to the container
+	writeConfigCmd := fmt.Sprintf("cat > /tmp/kubeadm-config.yaml << 'KUBEADM_EOF'\n%s\nKUBEADM_EOF", kubeadmConfig)
+	if _, err := podman.Exec(containerID, []string{"sh", "-c", writeConfigCmd}); err != nil {
+		return fmt.Errorf("failed to write kubeadm config: %w", err)
+	}
+
+	// Run kubeadm init with the config file
+	initCmd := `kubeadm init \
+  --config=/tmp/kubeadm-config.yaml \
+  --ignore-preflight-errors=NumCPU,Mem,SystemVerification,FileContent--proc-sys-net-bridge-bridge-nf-call-iptables \
+  --v=5`
+
+	output, err := podman.Exec(containerID, []string{"sh", "-c", initCmd})
+	if err != nil {
+		return fmt.Errorf("kubeadm init failed: %w\nOutput:\n%s", err, output)
+	}
+	return nil
+}
+
+// generateKubeadmConfig generates a kubeadm ClusterConfiguration YAML
+func (c *Cluster) generateKubeadmConfig() string {
+	var sb strings.Builder
+
+	// ClusterConfiguration
+	sb.WriteString("apiVersion: kubeadm.k8s.io/v1beta3\n")
+	sb.WriteString("kind: ClusterConfiguration\n")
+	sb.WriteString(fmt.Sprintf("networking:\n  podSubnet: %s\n  serviceSubnet: %s\n", c.config.PodSubnet, c.config.ServiceSubnet))
+	sb.WriteString("apiServer:\n  certSANs:\n  - localhost\n  - 127.0.0.1\n")
+
+	// Scheduler configuration
+	if c.config.SchedulerConfigPath != "" || len(c.config.SchedulerExtraArgs) > 0 || len(c.config.SchedulerExtraVols) > 0 {
+		sb.WriteString("scheduler:\n")
+
+		// Extra args
+		if len(c.config.SchedulerExtraArgs) > 0 || c.config.SchedulerConfigPath != "" {
+			sb.WriteString("  extraArgs:\n")
+			// If a scheduler config is provided, add the --config arg
+			if c.config.SchedulerConfigPath != "" {
+				sb.WriteString("    config: /etc/kubernetes/scheduler-config.yaml\n")
+			}
+			for key, value := range c.config.SchedulerExtraArgs {
+				sb.WriteString(fmt.Sprintf("    %s: \"%s\"\n", key, value))
+			}
+		}
+
+		// Extra volumes
+		if c.config.SchedulerConfigPath != "" || len(c.config.SchedulerExtraVols) > 0 {
+			sb.WriteString("  extraVolumes:\n")
+			// Add the scheduler config volume
+			if c.config.SchedulerConfigPath != "" {
+				sb.WriteString("  - name: scheduler-config\n")
+				sb.WriteString("    hostPath: /etc/kubernetes/scheduler-config.yaml\n")
+				sb.WriteString("    mountPath: /etc/kubernetes/scheduler-config.yaml\n")
+				sb.WriteString("    readOnly: true\n")
+				sb.WriteString("    pathType: File\n")
+			}
+			// Add user-specified extra volumes
+			for _, vol := range c.config.SchedulerExtraVols {
+				sb.WriteString(fmt.Sprintf("  - name: %s\n", vol.Name))
+				sb.WriteString(fmt.Sprintf("    hostPath: %s\n", vol.HostPath))
+				sb.WriteString(fmt.Sprintf("    mountPath: %s\n", vol.MountPath))
+				if vol.ReadOnly {
+					sb.WriteString("    readOnly: true\n")
+				}
+				pathType := vol.PathType
+				if pathType == "" {
+					pathType = "File"
+				}
+				sb.WriteString(fmt.Sprintf("    pathType: %s\n", pathType))
+			}
+		}
+	}
+
+	// Add InitConfiguration for CRI socket
+	sb.WriteString("---\n")
+	sb.WriteString("apiVersion: kubeadm.k8s.io/v1beta3\n")
+	sb.WriteString("kind: InitConfiguration\n")
+	sb.WriteString("nodeRegistration:\n")
+	sb.WriteString("  criSocket: unix:///var/run/crio/crio.sock\n")
+
+	return sb.String()
 }

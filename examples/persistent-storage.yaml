@@ -2,5 +2,8 @@ name: persistent-cluster
 nodes:
   controlPlanes: 1
   workers: 0
+cgroupManager: systemd
 storage:
   type: volume
+localBuilds:
+  crioBinary: /home/skunkerk/dev/src/github.com/cri-o/cri-o/bin/crio

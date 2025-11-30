@@ -19,10 +19,6 @@ write_crio_config() {
 [crio.runtime]
   cgroup_manager = "${manager}"
   conmon_cgroup = "${conmon_cgroup}"
-  conmon_env = [
-    "DBUS_SESSION_BUS_ADDRESS=unix:path=/var/run/dbus/system_bus_socket",
-    "XDG_RUNTIME_DIR=/run/user/0"
-  ]
 EOF
 }
 
@@ -34,25 +30,22 @@ KUBELET_EXTRA_ARGS=--container-runtime-endpoint=unix:///var/run/crio/crio.sock -
 EOF
 }
 
+# Always set _CRIO_ROOTLESS=1 so CRI-O skips OOM score adjustments
+# This triggers makeOCIConfigurationRootless() in CRI-O which is needed for both modes
+echo "_CRIO_ROOTLESS=1" >> /etc/sysconfig/crio
+
 if [ "$CGROUP_MANAGER" = "systemd" ]; then
     echo "Using systemd cgroup manager"
-
-    # Configure CRI-O for systemd
-    # Use conmon_cgroup = "system.slice" to use system-level systemd instead of systemctl --user
+    # Use conmon_cgroup = "system.slice" to use system-level systemd
     write_crio_config "systemd" "system.slice"
     write_kubelet_config "systemd"
-    
-    # Force CRI-O to use system bus (requires our patch)
-    echo "CRIO_FORCE_SYSTEM_BUS=true" >> /etc/sysconfig/crio
-    
-    echo "Configured for systemd cgroup manager"
 elif [ "$CGROUP_MANAGER" = "cgroupfs" ]; then
-    # Configure CRI-O for cgroupfs
+    echo "Using cgroupfs cgroup manager"
     write_crio_config "cgroupfs" "pod"
     write_kubelet_config "cgroupfs"
-    
-    echo "Configured for cgroupfs cgroup manager"
 else
     echo "Unknown cgroup manager: $CGROUP_MANAGER"
     exit 1
 fi
+
+echo "Configured for ${CGROUP_MANAGER} cgroup manager"

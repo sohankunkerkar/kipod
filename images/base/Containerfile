@@ -19,12 +19,10 @@ RUN dnf install -y --setopt=install_weak_deps=False \
   libseccomp-devel systemd-devel gpgme-devel device-mapper-devel \
   && dnf clean all \
   && git clone --depth 1 --branch release-${CRIO_VERSION} \
-     https://github.com/cri-o/cri-o.git /cri-o
+  https://github.com/cri-o/cri-o.git /cri-o
 
-# Apply patch and build with parallel compilation
-COPY patch_dbusmgr.py /tmp/
-RUN python3 /tmp/patch_dbusmgr.py /cri-o/internal/dbusmgr/dbusmgr.go \
-  && cd /cri-o && make -j$(nproc)
+# Build with parallel compilation
+RUN cd /cri-o && make -j$(nproc)
 
 # ============================================================================
 # Stage 2: Main node image
@@ -86,11 +84,9 @@ RUN mkdir -p /etc/crio/crio.conf.d /etc/cni/net.d /opt/cni/bin \
   /kind/images
 
 # Copy all config files
-COPY crun-wrapper.sh /usr/local/bin/crun-wrapper.sh
 COPY configure-cgroup-manager.sh /usr/local/bin/configure-cgroup-manager.sh
 COPY load-images.sh /usr/local/bin/load-images.sh
 COPY files/crio/00-kipod.conf /etc/crio/crio.conf.d/00-kipod.conf
-COPY files/crio/99-kipod-wrapper.conf /etc/crio/crio.conf.d/99-kipod-wrapper.conf
 COPY files/storage/storage.conf /etc/containers/storage.conf
 COPY files/crictl.yaml /etc/crictl.yaml
 COPY files/cni/10-kipod-bridge.conflist /etc/cni/net.d/10-kipod-bridge.conflist
@@ -102,26 +98,24 @@ COPY files/systemd/crio/20-dbus-dependency.conf /etc/systemd/system/crio.service
 COPY files/systemd/kipod-load-images.service /etc/systemd/system/kipod-load-images.service
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
-# Setup crun wrapper, enable services, set permissions (single layer)
-RUN chmod +x /usr/local/bin/crun-wrapper.sh /usr/local/bin/configure-cgroup-manager.sh /usr/local/bin/entrypoint.sh /usr/local/bin/load-images.sh \
-  && mv /usr/bin/crun /usr/bin/crun.real \
-  && ln -s /usr/local/bin/crun-wrapper.sh /usr/bin/crun \
+# Enable services and set permissions (single layer)
+RUN chmod +x /usr/local/bin/configure-cgroup-manager.sh /usr/local/bin/entrypoint.sh /usr/local/bin/load-images.sh \
   && systemctl enable crio kubelet dbus-broker.service kipod-load-images.service \
   && systemctl mask swap.target
 
 # Download K8s images in PARALLEL (major time saver: ~4min -> ~1min)
 RUN set -e; \
   for image in \
-    "registry.k8s.io/kube-apiserver:v${K8S_FULL_VERSION}" \
-    "registry.k8s.io/kube-controller-manager:v${K8S_FULL_VERSION}" \
-    "registry.k8s.io/kube-scheduler:v${K8S_FULL_VERSION}" \
-    "registry.k8s.io/kube-proxy:v${K8S_FULL_VERSION}" \
-    "registry.k8s.io/pause:3.9" \
-    "registry.k8s.io/etcd:3.5.15-0" \
-    "registry.k8s.io/coredns/coredns:v1.10.1"; do \
-    filename=$(echo $image | tr '/:' '_'); \
-    echo "Downloading: $image"; \
-    skopeo copy docker://$image docker-archive:/kind/images/${filename}.tar:$image & \
+  "registry.k8s.io/kube-apiserver:v${K8S_FULL_VERSION}" \
+  "registry.k8s.io/kube-controller-manager:v${K8S_FULL_VERSION}" \
+  "registry.k8s.io/kube-scheduler:v${K8S_FULL_VERSION}" \
+  "registry.k8s.io/kube-proxy:v${K8S_FULL_VERSION}" \
+  "registry.k8s.io/pause:3.9" \
+  "registry.k8s.io/etcd:3.5.15-0" \
+  "registry.k8s.io/coredns/coredns:v1.10.1"; do \
+  filename=$(echo $image | tr '/:' '_'); \
+  echo "Downloading: $image"; \
+  skopeo copy docker://$image docker-archive:/kind/images/${filename}.tar:$image & \
   done; \
   wait; \
   echo "All images downloaded"

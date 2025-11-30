@@ -59,6 +59,20 @@ func createCluster(name, configFile, nodeImage, kubeconfigPath string, retain bo
 		CrunBinary: kipodCfg.LocalBuilds.CrunBinary,
 		RuncBinary: kipodCfg.LocalBuilds.RuncBinary,
 		Retain:     retain,
+		// Scheduler configuration
+		SchedulerConfigPath: kipodCfg.Scheduler.ConfigPath,
+		SchedulerExtraArgs:  kipodCfg.Scheduler.ExtraArgs,
+	}
+
+	// Convert scheduler extra volumes
+	for _, vol := range kipodCfg.Scheduler.ExtraVolumes {
+		cfg.SchedulerExtraVols = append(cfg.SchedulerExtraVols, cluster.HostPathMount{
+			Name:      vol.Name,
+			HostPath:  vol.HostPath,
+			MountPath: vol.MountPath,
+			ReadOnly:  vol.ReadOnly,
+			PathType:  vol.PathType,
+		})
 	}
 
 	if waitDuration != "" {
