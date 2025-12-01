@@ -158,9 +158,18 @@ func createCluster(name, configFile, nodeImage, kubeconfigPath string, retain bo
 }
 
 func deleteCluster(name, kubeconfigPath string) error {
-	// TODO: Implement kubeconfigPath support (for removing cluster from kubeconfig)
 	if err := cluster.Delete(name); err != nil {
 		return fmt.Errorf("failed to delete cluster: %w", err)
+	}
+
+	// Delete the kubeconfig file
+	kubeconfigFile := kubeconfigPath
+	if kubeconfigFile == "" {
+		kubeconfigFile = fmt.Sprintf("%s/.kube/%s-config", os.Getenv("HOME"), name)
+	}
+	if err := os.Remove(kubeconfigFile); err != nil && !os.IsNotExist(err) {
+		// Log warning but don't fail - cluster deletion succeeded
+		style.Info("Warning: failed to remove kubeconfig %s: %v", kubeconfigFile, err)
 	}
 
 	if !quietMode {

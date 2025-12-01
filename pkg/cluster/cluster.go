@@ -269,11 +269,6 @@ func (c *Cluster) createContainerOptions(nodeName, role string) podman.CreateCon
 	// Always set KIPOD_CGROUP_MANAGER so configure-cgroup-manager.sh knows what to use
 	env = append(env, fmt.Sprintf("KIPOD_CGROUP_MANAGER=%s", cgroupMgr))
 
-	// Always set _CRIO_ROOTLESS=1 to signal rootless mode
-	// This tells CRI-O to skip privileged operations (like OOM score adjustments)
-	// CRI-O will still use system D-Bus (thanks to our patch detecting UID 0)
-	env = append(env, "_CRIO_ROOTLESS=1")
-
 	opts := podman.CreateContainerOptions{
 		Name:     nodeName,
 		Image:    c.config.Image,

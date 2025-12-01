@@ -9,6 +9,10 @@ CGROUP_MANAGER="${KIPOD_CGROUP_MANAGER:-cgroupfs}"
 
 echo "Configuring cgroup manager: ${CGROUP_MANAGER}"
 
+# Always set _CRIO_ROOTLESS=1 so CRI-O skips OOM score adjustments
+# This triggers makeOCIConfigurationRootless() in CRI-O which is needed for both modes
+echo "_CRIO_ROOTLESS=1" >> /etc/sysconfig/crio
+
 
 
 write_crio_config() {
@@ -30,9 +34,6 @@ KUBELET_EXTRA_ARGS=--container-runtime-endpoint=unix:///var/run/crio/crio.sock -
 EOF
 }
 
-# Always set _CRIO_ROOTLESS=1 so CRI-O skips OOM score adjustments
-# This triggers makeOCIConfigurationRootless() in CRI-O which is needed for both modes
-echo "_CRIO_ROOTLESS=1" >> /etc/sysconfig/crio
 
 if [ "$CGROUP_MANAGER" = "systemd" ]; then
     echo "Using systemd cgroup manager"
